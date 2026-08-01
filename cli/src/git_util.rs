@@ -20,6 +20,7 @@ use std::io::Write as _;
 use std::iter;
 use std::mem;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -28,6 +29,8 @@ use crossterm::terminal::Clear;
 use crossterm::terminal::ClearType;
 use indoc::writedoc;
 use itertools::Itertools as _;
+use jj_lib::file_util;
+use jj_lib::file_util::IoResultExt as _;
 use jj_lib::git;
 use jj_lib::git::FailedRefExportReason;
 use jj_lib::git::GitExportStats;
@@ -53,6 +56,7 @@ use crate::cli_util::print_updated_commits;
 use crate::command_error::CommandError;
 use crate::command_error::cli_error;
 use crate::command_error::user_error;
+use crate::command_error::user_error_with_message;
 use crate::formatter::Formatter;
 use crate::formatter::FormatterExt as _;
 use crate::revset_util::parse_remote_auto_track_bookmarks_map;
@@ -560,6 +564,135 @@ pub fn print_push_stats(ui: &Ui, stats: &GitPushStats) -> io::Result<()> {
                 write!(formatter, ": {err}")?;
             }
             writeln!(formatter)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn create_git_worktree(
+    ui: &Ui,
+    git_settings: &GitSettings,
+    main_workspace_root: &Path,
+    destination: &Path,
+) -> Result<(), CommandError> {
+    // Use relative paths to match jj's convention for portable repositories.
+    // Silently ignored by git versions that don't support it.
+    let relative_paths_config = ["-c", "worktree.useRelativePaths=true"];
+
+    let dest_exists = destination.exists() && !file_util::is_empty_dir(destination)?;
+    if dest_exists {
+        // `git worktree add` refuses to create a worktree in a non-empty
+        // directory. Work around this by creating in a temporary sibling
+        // directory, moving the .git gitlink, and repairing the paths.
+        let tmp =
+            tempfile::TempDir::new_in(destination.parent().unwrap_or(std::path::Path::new(".")))
+                .map_err(|err| {
+                    user_error_with_message(
+                        "Failed to create temporary directory for Git worktree",
+                        err,
+                    )
+                })?;
+        let tmp_path = tmp.keep();
+
+        run_git_worktree_add(
+            git_settings,
+            &relative_paths_config,
+            main_workspace_root,
+            &tmp_path,
+        )?;
+
+        std::fs::rename(tmp_path.join(".git"), destination.join(".git")).context(destination)?;
+        std::fs::remove_dir_all(&tmp_path).ok();
+
+        let output = Command::new(&git_settings.executable_path)
+            .args(relative_paths_config)
+            .args(["worktree", "repair", "--"])
+            .arg(destination)
+            .current_dir(main_workspace_root)
+            .output()
+            .map_err(|err| user_error_with_message("Failed to run `git worktree repair`", err))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(user_error(format!(
+                "Failed to repair Git worktree paths: {stderr}"
+            )));
+        }
+    } else {
+        run_git_worktree_add(
+            git_settings,
+            &relative_paths_config,
+            main_workspace_root,
+            destination,
+        )?;
+    }
+
+    writeln!(ui.status(), "Created Git worktree for the new workspace.")?;
+    Ok(())
+}
+
+fn run_git_worktree_add(
+    git_settings: &GitSettings,
+    extra_config: &[&str],
+    main_workspace_root: &Path,
+    destination: &Path,
+) -> Result<(), CommandError> {
+    let output = Command::new(&git_settings.executable_path)
+        .args(extra_config)
+        .args(["worktree", "add", "--detach", "--no-checkout", "--"])
+        .arg(destination)
+        .arg("HEAD")
+        .current_dir(main_workspace_root)
+        .output()
+        .map_err(|err| user_error_with_message("Failed to run `git worktree add`", err))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(user_error(format!(
+            "Failed to create Git worktree: {stderr}"
+        )));
+    }
+    Ok(())
+}
+
+pub fn remove_git_worktree(
+    ui: &Ui,
+    git_settings: &GitSettings,
+    main_workspace_root: &Path,
+    worktree_path: &Path,
+) -> Result<(), CommandError> {
+    let dot_git = worktree_path.join(".git");
+    if !dot_git.is_file() {
+        return Ok(());
+    }
+    // Remove the .git gitlink file, then prune the worktree metadata.
+    // We don't use `git worktree remove` because it deletes the directory
+    // contents, and jj workspace forget should preserve workspace files.
+    std::fs::remove_file(&dot_git).ok();
+
+    let output = Command::new(&git_settings.executable_path)
+        .args(["worktree", "prune"])
+        .current_dir(main_workspace_root)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            writeln!(
+                ui.status(),
+                r#"Removed Git worktree for "{}"."#,
+                worktree_path.display()
+            )?;
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            writeln!(
+                ui.warning_default(),
+                r#"Failed to prune Git worktree for "{}": {stderr}"#,
+                worktree_path.display()
+            )?;
+        }
+        Err(err) => {
+            writeln!(
+                ui.warning_default(),
+                "Failed to run `git worktree prune`: {err}"
+            )?;
         }
     }
     Ok(())
