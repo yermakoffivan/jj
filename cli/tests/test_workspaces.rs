@@ -1525,11 +1525,13 @@ fn test_workspaces_forget() {
     main_dir.run_jj(["workspace", "add", "../third"]).success();
     // ... and then forget it, a non-existent one, and the secondary workspace too
     let output = main_dir.run_jj(["workspace", "forget", "secondary", "nonexistent", "third"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output.normalize_backslash(), @r#"
     ------- stderr -------
     Warning: No such workspace: nonexistent
+    Removed workspace directory "$TEST_ENV/secondary".
+    Removed workspace directory "$TEST_ENV/third".
     [EOF]
-    ");
+    "#);
     // No workspaces left
     let output = main_dir.run_jj(["workspace", "list"]);
     insta::assert_snapshot!(output, @"");
@@ -1691,6 +1693,57 @@ fn test_workspaces_forget_abandon_commits() {
     ◆  000000000000
     [EOF]
     ");
+}
+
+#[test]
+fn test_workspaces_forget_removes_directory() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "main"]).success();
+    let main_dir = test_env.work_dir("main");
+
+    main_dir.write_file("file", "contents");
+    main_dir.run_jj(["commit", "-m", "initial"]).success();
+
+    main_dir
+        .run_jj(["workspace", "add", "../secondary"])
+        .success();
+    let secondary_dir = test_env.work_dir("secondary");
+    secondary_dir.write_file("secondary_file", "secondary contents");
+    secondary_dir.run_jj(["status"]).success();
+
+    assert!(test_env.env_root().join("secondary").is_dir());
+    assert!(test_env.env_root().join("secondary/file").is_file());
+    assert!(
+        test_env
+            .env_root()
+            .join("secondary/secondary_file")
+            .is_file()
+    );
+
+    let output = main_dir.run_jj(["workspace", "forget", "secondary"]);
+    insta::assert_snapshot!(output.normalize_backslash(), @r#"
+    ------- stderr -------
+    Removed workspace directory "$TEST_ENV/secondary".
+    [EOF]
+    "#);
+
+    assert!(!test_env.env_root().join("secondary").exists());
+
+    let output = main_dir.run_jj(["log", "--limit", "3"]);
+    insta::assert_snapshot!(output, @r#"
+    @  rlvkpnrz test.user@example.com 2001-02-03 08:05:08 504e3d8c
+    │  (empty) (no description set)
+    │ ○  pmmvwywv test.user@example.com 2001-02-03 08:05:10 0464fb03
+    ├─╯  (no description set)
+    ○  qpvuntsm test.user@example.com 2001-02-03 08:05:08 7b22a8cb
+    │  initial
+    [EOF]
+    "#);
+
+    main_dir
+        .run_jj(["workspace", "add", "../secondary"])
+        .success();
+    assert!(test_env.env_root().join("secondary").is_dir());
 }
 
 /// Test context of commit summary template
@@ -1991,22 +2044,25 @@ fn test_workspaces_rename_new_workspace_name_already_used() {
 }
 
 #[test]
-fn test_workspaces_rename_forgotten_workspace() {
+fn test_workspaces_forget_and_readd() {
     let test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "main"]).success();
     let main_dir = test_env.work_dir("main");
+    main_dir.write_file("file", "contents");
+    main_dir.run_jj(["commit", "-m", "initial"]).success();
+
     main_dir
         .run_jj(["workspace", "add", "--name", "second", "../secondary"])
         .success();
+    assert!(test_env.env_root().join("secondary").is_dir());
+
     main_dir.run_jj(["workspace", "forget", "second"]).success();
-    let secondary_dir = test_env.work_dir("secondary");
-    let output = secondary_dir.run_jj(["workspace", "rename", "third"]);
-    insta::assert_snapshot!(output, @"
-    ------- stderr -------
-    Error: The current workspace 'second' is not tracked in the repo.
-    [EOF]
-    [exit status: 1]
-    ");
+    assert!(!test_env.env_root().join("secondary").exists());
+
+    main_dir
+        .run_jj(["workspace", "add", "--name", "second", "../secondary"])
+        .success();
+    assert!(test_env.env_root().join("secondary").is_dir());
 }
 
 #[test]

@@ -3819,7 +3819,7 @@ By default, the new workspace inherits the sparse patterns of the current worksp
 
 Stop tracking a workspace's working-copy commit in the repo
 
-The workspace will not be touched on disk. It can be deleted from disk before or after running this command.
+The workspace directory and its contents are removed from disk unless it is the main workspace (which contains the repository store). The working-copy state is always snapshotted into a commit before the workspace is forgotten, so no work is lost.
 
 **Usage:** `jj workspace forget [WORKSPACES]...`
 

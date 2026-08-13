@@ -26,8 +26,10 @@ use crate::ui::Ui;
 
 /// Stop tracking a workspace's working-copy commit in the repo
 ///
-/// The workspace will not be touched on disk. It can be deleted from disk
-/// before or after running this command.
+/// The workspace directory and its contents are removed from disk unless it
+/// is the main workspace (which contains the repository store). The
+/// working-copy state is always snapshotted into a commit before the
+/// workspace is forgotten, so no work is lost.
 #[derive(clap::Args, Clone, Debug)]
 pub struct WorkspaceForgetArgs {
     /// Names of the workspaces to forget. By default, forgets only the current
@@ -74,6 +76,22 @@ pub async fn cmd_workspace_forget(
 
     let workspace_store = SimpleWorkspaceStore::load(workspace_command.repo_path())?;
 
+    let repo_path = workspace_command.repo_path().to_owned();
+
+    let workspace_paths: Vec<_> = forget_ws
+        .iter()
+        .filter_map(|ws| {
+            let rel_path = workspace_store.get_workspace_path(ws).ok().flatten()?;
+            let abs_path = dunce::canonicalize(repo_path.join(rel_path)).ok()?;
+            // Don't delete the main workspace directory - it contains the
+            // actual repository store.
+            if abs_path.join(".jj").join("repo").is_dir() {
+                return None;
+            }
+            Some(abs_path)
+        })
+        .collect();
+
     // bundle every workspace forget into a single transaction, so that e.g.
     // undo correctly restores all of them at once.
     let mut tx = workspace_command.start_transaction();
@@ -94,5 +112,22 @@ pub async fn cmd_workspace_forget(
     };
 
     tx.finish(ui, description).await?;
+
+    for path in &workspace_paths {
+        if let Err(err) = std::fs::remove_dir_all(path) {
+            writeln!(
+                ui.warning_default(),
+                "Failed to remove workspace directory \"{}\": {err}",
+                path.display()
+            )?;
+        } else {
+            writeln!(
+                ui.status(),
+                "Removed workspace directory \"{}\".",
+                path.display()
+            )?;
+        }
+    }
+
     Ok(())
 }

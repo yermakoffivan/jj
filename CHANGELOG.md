@@ -12,6 +12,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking changes
 
+* `jj workspace forget` now removes the workspace directory and its contents
+  from disk, mirroring how `git worktree remove` works. Previously, the
+  directory and files were left behind, which meant re-adding a workspace
+  at the same path required manual cleanup because `jj workspace add`
+  rejects non-empty directories. The working-copy state is
+  always snapshotted into a commit before removal, so no work is lost.
+  The main workspace directory is never removed (it contains the
+  repository store).
+
 ### Deprecations
 
 ### New features
